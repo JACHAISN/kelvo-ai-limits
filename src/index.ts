@@ -154,3 +154,75 @@ export async function checkGlobalDailySafetyNet(
   }
   return { totalToday, exceeded };
 }
+
+// --- Shared Gemini calling logic ---
+// Every app in the suite generates short factual-summary-to-text completions the same way, so
+// the actual provider call lives here too, not just the rate limiting. Model selection by tier
+// is centralized here specifically so every app's AI feature automatically gets the
+// free-Flash/premium-Pro quality split without each app hardcoding model names.
+
+// "Preview" models can change or get pulled without much notice, and Google renames Gemini
+// models more often than most providers — if either of these starts 404ing, check
+// https://ai.google.dev/gemini-api/docs/models for current names and update here (once, for
+// every app, instead of in five places).
+const FREE_TIER_MODEL = "gemini-3-flash-preview";
+const PREMIUM_TIER_MODEL = "gemini-3-pro";
+
+export interface GenerateOptions {
+  apiKey: string;
+  tier: SubscriptionTier;
+  systemPrompt: string;
+  userContent: string;
+  maxOutputTokens?: number;
+}
+
+export interface GenerateResult {
+  content: string | null;
+  succeeded: boolean;
+}
+
+export async function generateWithGemini(options: GenerateOptions): Promise<GenerateResult> {
+  const model = options.tier === "premium" ? PREMIUM_TIER_MODEL : FREE_TIER_MODEL;
+  const maxOutputTokens = options.maxOutputTokens ?? 400;
+
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": options.apiKey },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: options.systemPrompt }] },
+        contents: [{ role: "user", parts: [{ text: options.userContent }] }],
+        generationConfig: {
+          maxOutputTokens,
+          // gemini-3-*-preview models spend part of the output budget on internal "thinking" by
+          // default, which for a short direct task just eats the budget and risks truncating the
+          // real answer mid-sentence. Disabling it fixes that and costs less per call besides.
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      const errBody = await res.text();
+      console.error("kelvo-ai-limits: Gemini API error", res.status, errBody);
+      return { content: null, succeeded: false };
+    }
+
+    const data = await res.json();
+    const candidate = data.candidates?.[0];
+    const finishReason = candidate?.finishReason;
+    const text: string | undefined = candidate?.content?.parts?.[0]?.text?.trim();
+
+    if (finishReason && finishReason !== "STOP") {
+      // MAX_TOKENS (truncated mid-response), SAFETY, etc. — never return a broken/partial
+      // response as if it were a real one.
+      console.error("kelvo-ai-limits: Gemini response did not finish normally", finishReason, text);
+      return { content: null, succeeded: false };
+    }
+
+    return { content: text ?? null, succeeded: Boolean(text) };
+  } catch (err) {
+    console.error("kelvo-ai-limits: Gemini call threw", err);
+    return { content: null, succeeded: false };
+  }
+}

@@ -29,13 +29,14 @@ const nextConfig: NextConfig = {
 
 ## Integration pattern
 
-Call `canUseAiFeature` **before** making the AI provider request, and `logAiUsage`
-**immediately after** it responds — success or failure, since a failed call can still have
-consumed tokens.
+Call `canUseAiFeature` **before** making the AI provider request, `generateWithGemini` to
+actually make it (this also picks the right model for the user's tier — Flash for free, Pro for
+premium, so every app gets that quality split for free), and `logAiUsage` **immediately after**
+it responds — success or failure, since a failed call can still have consumed tokens.
 
 ```ts
 // app/api/some-ai-feature/route.ts
-import { canUseAiFeature, logAiUsage } from "kelvo-ai-limits";
+import { canUseAiFeature, generateWithGemini, logAiUsage } from "kelvo-ai-limits";
 
 export async function POST(req: NextRequest) {
   const supabase = serverSupabase(accessToken); // authenticated as the requesting user
@@ -49,17 +50,26 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let succeeded = false;
-  try {
-    const result = await callYourAiProvider(/* ... */);
-    succeeded = true;
-    return NextResponse.json({ content: result });
-  } finally {
-    // Fire-and-forget is fine here — don't let logging failures block the response.
-    logAiUsage(supabase, userId, "reflection", "habits", succeeded);
+  const result = await generateWithGemini({
+    apiKey: process.env.GEMINI_API_KEY!,
+    tier: check.tier,
+    systemPrompt: "...",
+    userContent: "...", // your app's own factual summary of whatever it's reflecting on
+  });
+
+  // Fire-and-forget is fine here — don't let logging failures block the response.
+  logAiUsage(supabase, userId, "reflection", "habits", result.succeeded);
+
+  if (!result.content) {
+    return NextResponse.json({ error: "Failed to generate — try again." }, { status: 502 });
   }
+  return NextResponse.json({ content: result.content });
 }
 ```
+
+You don't have to use `generateWithGemini` — any provider works as long as you still call
+`canUseAiFeature` first and `logAiUsage` after. But reusing it means model-tier upgrades,
+thinking-token fixes, and truncation handling only ever need fixing in one place.
 
 ## Call types
 
