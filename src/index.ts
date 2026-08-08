@@ -12,17 +12,17 @@ export type SubscriptionTier = "free" | "premium";
 export const FREE_REFLECTION_LIMIT_PER_MONTH = 5;
 
 // Premium's 60/month (~2/day) is a soft ceiling, not something advertised to users as a hard
-// number — generous enough that a normal user never notices it, while still bounding worst-case
+// number: generous enough that a normal user never notices it, while still bounding worst-case
 // per-subscriber API spend to something predictable.
 export const PREMIUM_REFLECTION_LIMIT_PER_MONTH = 60;
 
 // Recap/insight/chat calls pull more context (multiple days/entries) and cost meaningfully more
 // per call than a single-entry reflection, so they share their own much smaller bucket. Free
-// tier has zero access to this bucket, full stop — see isMultiEntry() below.
+// tier has zero access to this bucket, full stop (see isMultiEntry() below).
 export const PREMIUM_MULTI_ENTRY_LIMIT_PER_MONTH = 4;
 const MULTI_ENTRY_CALL_TYPES: CallType[] = ["recap", "insight", "chat"];
 
-// Cross-user monitoring only (not enforced anywhere in code) — start conservative, raise once
+// Cross-user monitoring only (not enforced anywhere in code): start conservative, raise once
 // real usage data comes in. Set the actual hard spend cap in your AI provider's console itself
 // (Anthropic/Gemini/OpenAI); this number is for noticing a problem, not preventing one.
 export const GLOBAL_DAILY_CALL_ALERT_THRESHOLD = 200;
@@ -51,7 +51,7 @@ async function getTier(supabase: SupabaseClient, userId: string): Promise<Subscr
     .maybeSingle();
 
   // Absence of a row means free tier by default. Subscription rows only get created once a
-  // payment provider webhook exists (a later build) — until then, "no row" must mean "not
+  // payment provider webhook exists (a later build). Until then, "no row" must mean "not
   // paying," never the reverse.
   if (!data || data.status !== "premium") return "free";
   if (data.current_period_end && new Date(data.current_period_end) < new Date()) return "free";
@@ -59,8 +59,8 @@ async function getTier(supabase: SupabaseClient, userId: string): Promise<Subscr
 }
 
 /**
- * Call this BEFORE making any server-side AI request, never after — see README.md for the
- * integration pattern every Kelvo app should follow when it adds an AI feature.
+ * Call this BEFORE making any server-side AI request, never after (see README.md for the
+ * integration pattern every Kelvo app should follow when it adds an AI feature).
  */
 export async function canUseAiFeature(
   supabase: SupabaseClient,
@@ -82,7 +82,7 @@ export async function canUseAiFeature(
       .gte("created_at", monthStart);
     const used = count ?? 0;
     if (used >= PREMIUM_MULTI_ENTRY_LIMIT_PER_MONTH) {
-      // Premium hitting this at all is unusual — the distinct reason string lets you query
+      // Premium hitting this at all is unusual: the distinct reason string lets you query
       // kelvo_ai_usage for "premium_recap_limit_reached" events to review for bugs/abuse.
       return { allowed: false, reason: "premium_recap_limit_reached", remaining_this_period: 0, tier };
     }
@@ -123,16 +123,16 @@ export async function logAiUsage(
     .from("kelvo_ai_usage")
     .insert({ user_id: userId, call_type: callType, app, succeeded });
   if (error) {
-    // Never let usage-logging failures break the actual AI feature — just surface it in logs.
+    // Never let usage-logging failures break the actual AI feature. Just surface it in logs.
     console.error("kelvo-ai-limits: failed to log AI usage", error);
   }
 }
 
 /**
- * Cross-user monitoring only — requires a service-role client (bypasses RLS by design, since
+ * Cross-user monitoring only: requires a service-role client (bypasses RLS by design, since
  * this needs visibility across every user's rows, not just the caller's own). This never blocks
  * anything; it only logs when suite-wide daily call volume looks abnormal. The real hard spend
- * cap belongs in your AI provider's console, not here — see the constant's doc comment above.
+ * cap belongs in your AI provider's console, not here (see the constant's doc comment above).
  */
 export async function checkGlobalDailySafetyNet(
   serviceRoleClient: SupabaseClient
@@ -149,7 +149,7 @@ export async function checkGlobalDailySafetyNet(
   const exceeded = totalToday > GLOBAL_DAILY_CALL_ALERT_THRESHOLD;
   if (exceeded) {
     console.error(
-      `kelvo-ai-limits: SAFETY NET — ${totalToday} AI calls today across all users, over the ${GLOBAL_DAILY_CALL_ALERT_THRESHOLD} alert threshold. Review usage and consider raising the threshold or investigating abuse.`
+      `kelvo-ai-limits: SAFETY NET: ${totalToday} AI calls today across all users, over the ${GLOBAL_DAILY_CALL_ALERT_THRESHOLD} alert threshold. Review usage and consider raising the threshold or investigating abuse.`
     );
   }
   return { totalToday, exceeded };
@@ -162,7 +162,7 @@ export async function checkGlobalDailySafetyNet(
 // free-Flash/premium-Pro quality split without each app hardcoding model names.
 
 // "Preview" models can change or get pulled without much notice, and Google renames Gemini
-// models more often than most providers — if either of these starts 404ing, check
+// models more often than most providers. If either of these starts 404ing, check
 // https://ai.google.dev/gemini-api/docs/models for current names and update here (once, for
 // every app, instead of in five places).
 const FREE_TIER_MODEL = "gemini-3-flash-preview";
@@ -214,7 +214,7 @@ export async function generateWithGemini(options: GenerateOptions): Promise<Gene
     const text: string | undefined = candidate?.content?.parts?.[0]?.text?.trim();
 
     if (finishReason && finishReason !== "STOP") {
-      // MAX_TOKENS (truncated mid-response), SAFETY, etc. — never return a broken/partial
+      // MAX_TOKENS (truncated mid-response), SAFETY, etc.: never return a broken/partial
       // response as if it were a real one.
       console.error("kelvo-ai-limits: Gemini response did not finish normally", finishReason, text);
       return { content: null, succeeded: false };

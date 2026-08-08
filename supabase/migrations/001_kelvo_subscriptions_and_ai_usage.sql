@@ -1,6 +1,6 @@
 -- Kelvo AI subscription state + usage tracking (shared across the whole suite)
 -- Run this once in the Supabase SQL Editor for the shared Kelvo project (bjpdnkjwjtlomyniawvj).
--- These tables are suite-wide, not owned by any single app — keyed to the shared Kelvo user id.
+-- These tables are suite-wide, not owned by any single app: keyed to the shared Kelvo user id.
 
 create table if not exists public.kelvo_subscriptions (
   user_id uuid primary key references auth.users(id) on delete cascade,
@@ -14,11 +14,11 @@ create table if not exists public.kelvo_subscriptions (
 
 alter table public.kelvo_subscriptions enable row level security;
 
--- Read-only for users. Deliberately no insert/update/delete policy for the authenticated role —
+-- Read-only for users. Deliberately no insert/update/delete policy for the authenticated role:
 -- writes only happen via the service_role key (which bypasses RLS entirely), e.g. from a future
--- Stripe/Play Billing webhook handler. A user with no row here is implicitly "free" — see
+-- Stripe/Play Billing webhook handler. A user with no row here is implicitly "free" (see
 -- getTier() in kelvo-ai-limits, which treats a missing row as free tier rather than requiring
--- one to exist.
+-- one to exist).
 create policy "kelvo_subscriptions_select_own" on public.kelvo_subscriptions
   for select using (auth.uid() = user_id);
 
@@ -37,7 +37,7 @@ create index if not exists kelvo_ai_usage_created_idx on public.kelvo_ai_usage (
 
 alter table public.kelvo_ai_usage enable row level security;
 
--- Append-only from the calling user's own authenticated session — logging your own usage can't
+-- Append-only from the calling user's own authenticated session: logging your own usage can't
 -- hurt anyone but yourself, unlike subscription state. No update/delete policy: the log is
 -- immutable once written.
 create policy "kelvo_ai_usage_select_own" on public.kelvo_ai_usage
