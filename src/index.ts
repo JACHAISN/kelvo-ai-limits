@@ -184,7 +184,13 @@ export interface GenerateResult {
 
 export async function generateWithGemini(options: GenerateOptions): Promise<GenerateResult> {
   const model = options.tier === "premium" ? PREMIUM_TIER_MODEL : FREE_TIER_MODEL;
-  const maxOutputTokens = options.maxOutputTokens ?? 400;
+  const requestedMaxOutputTokens = options.maxOutputTokens ?? 400;
+  // Pro can't turn thinking off (see below), and even at the lowest level it spends real tokens
+  // reasoning before it answers: measured ~150 for a one-line reply, ~500 for a multi-source
+  // reflection prompt (journal + workout + habits + tasks). Padding generously here keeps that
+  // variance from eating into the actual response and truncating it; the cost difference is
+  // negligible at Flash/Pro pricing.
+  const maxOutputTokens = model === PREMIUM_TIER_MODEL ? requestedMaxOutputTokens + 700 : requestedMaxOutputTokens;
 
   try {
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
