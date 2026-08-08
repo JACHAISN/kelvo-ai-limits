@@ -194,10 +194,11 @@ export async function generateWithGemini(options: GenerateOptions): Promise<Gene
         contents: [{ role: "user", parts: [{ text: options.userContent }] }],
         generationConfig: {
           maxOutputTokens,
-          // gemini-3-*-preview models spend part of the output budget on internal "thinking" by
-          // default, which for a short direct task just eats the budget and risks truncating the
-          // real answer mid-sentence. Disabling it fixes that and costs less per call besides.
-          thinkingConfig: { thinkingBudget: 0 },
+          // Flash tolerates disabling thinking outright, which avoids it eating the output
+          // budget on a short direct task and risking a mid-sentence truncation. Pro rejects
+          // thinkingBudget: 0 with a 400 ("this model only works in thinking mode"), so it gets
+          // the lowest thinking level instead, the closest equivalent it actually supports.
+          thinkingConfig: model === PREMIUM_TIER_MODEL ? { thinkingLevel: "LOW" } : { thinkingBudget: 0 },
         },
       }),
     });
