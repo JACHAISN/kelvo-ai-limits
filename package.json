@@ -1,0 +1,13 @@
+{
+  "name": "kelvo-ai-limits",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Shared subscription state + AI rate-limiting layer for the Kelvo suite. No secrets live in this package — every Kelvo app supplies its own Supabase client and credentials.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "peerDependencies": {
+    "@supabase/supabase-js": "^2"
+  },
+  "license": "UNLICENSED"
+}
