@@ -164,9 +164,10 @@ export async function checkGlobalDailySafetyNet(
 // "Preview" models can change or get pulled without much notice, and Google renames Gemini
 // models more often than most providers. If either of these starts 404ing, check
 // https://ai.google.dev/gemini-api/docs/models for current names and update here (once, for
-// every app, instead of in five places).
+// every app, instead of in five places). gemini-3-pro-preview was shut down 2026-03-09;
+// gemini-3.1-pro-preview is its replacement.
 const FREE_TIER_MODEL = "gemini-3-flash-preview";
-const PREMIUM_TIER_MODEL = "gemini-3-pro";
+const PREMIUM_TIER_MODEL = "gemini-3.1-pro-preview";
 
 export interface GenerateOptions {
   apiKey: string;
