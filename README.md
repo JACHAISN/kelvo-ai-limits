@@ -71,6 +71,30 @@ You don't have to use `generateWithGemini`: any provider works as long as you st
 `canUseAiFeature` first and `logAiUsage` after. But reusing it means model-tier upgrades,
 thinking-token fixes, and truncation handling only ever need fixing in one place.
 
+## Monthly window and time zones
+
+Limits count calls since the start of the current calendar month. Pass the user's IANA time
+zone as the optional fourth argument and the month starts at their local midnight on the 1st:
+
+```ts
+// The browser knows it: Intl.DateTimeFormat().resolvedOptions().timeZone, e.g. "America/Denver".
+const check = await canUseAiFeature(supabase, userId, "reflection", timeZone);
+```
+
+Leave it out (or pass an unknown name) and the month starts at midnight UTC, as before.
+
+## When the usage check fails
+
+If the `kelvo_ai_usage` count query errors, the check **fails closed**: `allowed` is false and
+`reason` is `usage_check_failed` (exported as `USAGE_CHECK_FAILED_REASON`). This is not a limit
+the user hit, so show `USAGE_CHECK_FAILED_MESSAGE` ("try again in a minute") rather than an
+upgrade prompt. An empty usage table is not an error and still allows the call.
+
+## Tests
+
+`npm test` runs `test/limits.test.ts` with Node's built-in runner (Node 24 runs TypeScript
+directly, nothing to install).
+
 ## Call types
 
 - `"reflection"`: single-entry, cheap. Free tier gets `FREE_REFLECTION_LIMIT_PER_MONTH` (5/mo).

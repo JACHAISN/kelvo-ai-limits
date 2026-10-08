@@ -34,12 +34,55 @@ export interface UsageCheckResult {
   tier: SubscriptionTier;
 }
 
+// Sent back when the usage count itself could not be read (network blip, RLS problem, outage).
+// The check fails closed: without a count there is no way to know the limit is not already used
+// up, so the call is denied. Apps show USAGE_CHECK_FAILED_MESSAGE instead of an upgrade prompt,
+// because this is not a limit the user has hit.
+export const USAGE_CHECK_FAILED_REASON = "usage_check_failed";
+export const USAGE_CHECK_FAILED_MESSAGE = "We couldn't check your AI usage just now. Please try again in a minute.";
+
 function isMultiEntry(callType: CallType): boolean {
   return MULTI_ENTRY_CALL_TYPES.includes(callType);
 }
 
-function currentCalendarMonthStart(): string {
-  const now = new Date();
+// How many milliseconds the wall clock in `timeZone` is ahead of UTC at the instant `at`.
+function zoneOffsetMs(timeZone: string, at: Date): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+    second: "numeric",
+  }).formatToParts(at);
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+  const wallClockAsUtc = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"));
+  return wallClockAsUtc - Math.floor(at.getTime() / 1000) * 1000;
+}
+
+/**
+ * The instant the current calendar month began for the user. With an IANA time zone (for
+ * example "America/Denver", from the browser's Intl.DateTimeFormat().resolvedOptions().timeZone)
+ * that is local midnight on the 1st, so a user's monthly allowance resets when their own month
+ * turns over. With no time zone, or one Intl does not recognise, it falls back to the UTC month
+ * start, which is what every caller got before the time zone parameter existed.
+ */
+export function currentCalendarMonthStart(timeZone?: string | null, now: Date = new Date()): string {
+  if (timeZone) {
+    try {
+      const local = new Date(now.getTime() + zoneOffsetMs(timeZone, now));
+      const firstAsUtc = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), 1);
+      // Subtract the offset in force at that midnight, then check once more in case a daylight
+      // saving change sits between the guess and the real answer.
+      let start = firstAsUtc - zoneOffsetMs(timeZone, new Date(firstAsUtc));
+      start = firstAsUtc - zoneOffsetMs(timeZone, new Date(start));
+      return new Date(start).toISOString();
+    } catch {
+      // Unknown time zone name: fall through to UTC rather than failing the AI feature.
+    }
+  }
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
 }
 
@@ -58,28 +101,39 @@ async function getTier(supabase: SupabaseClient, userId: string): Promise<Subscr
   return "premium";
 }
 
+function usageCheckFailed(tier: SubscriptionTier, error: unknown): UsageCheckResult {
+  console.error("kelvo-ai-limits: usage count query failed, denying the call", error);
+  return { allowed: false, reason: USAGE_CHECK_FAILED_REASON, remaining_this_period: null, tier };
+}
+
 /**
  * Call this BEFORE making any server-side AI request, never after (see README.md for the
  * integration pattern every Kelvo app should follow when it adds an AI feature).
+ *
+ * `timeZone` is optional: pass the user's IANA time zone so the monthly window starts at their
+ * local month start. Leave it out and the window starts at the UTC month start.
  */
 export async function canUseAiFeature(
   supabase: SupabaseClient,
   userId: string,
-  callType: CallType
+  callType: CallType,
+  timeZone?: string | null
 ): Promise<UsageCheckResult> {
   const tier = await getTier(supabase, userId);
-  const monthStart = currentCalendarMonthStart();
+  const monthStart = currentCalendarMonthStart(timeZone);
 
   if (isMultiEntry(callType)) {
     if (tier === "free") {
       return { allowed: false, reason: "free_tier_no_multi_entry_access", remaining_this_period: 0, tier };
     }
-    const { count } = await supabase
+    const { count, error } = await supabase
       .from("kelvo_ai_usage")
       .select("id", { count: "exact", head: true })
       .eq("user_id", userId)
       .in("call_type", MULTI_ENTRY_CALL_TYPES)
       .gte("created_at", monthStart);
+    // An empty table is not an error: it comes back as count 0 with no error.
+    if (error) return usageCheckFailed(tier, error);
     const used = count ?? 0;
     if (used >= PREMIUM_MULTI_ENTRY_LIMIT_PER_MONTH) {
       // Premium hitting this at all is unusual: the distinct reason string lets you query
@@ -90,12 +144,13 @@ export async function canUseAiFeature(
   }
 
   const limit = tier === "premium" ? PREMIUM_REFLECTION_LIMIT_PER_MONTH : FREE_REFLECTION_LIMIT_PER_MONTH;
-  const { count } = await supabase
+  const { count, error } = await supabase
     .from("kelvo_ai_usage")
     .select("id", { count: "exact", head: true })
     .eq("user_id", userId)
     .eq("call_type", callType)
     .gte("created_at", monthStart);
+  if (error) return usageCheckFailed(tier, error);
   const used = count ?? 0;
   if (used >= limit) {
     return {
