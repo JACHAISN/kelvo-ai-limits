@@ -71,6 +71,39 @@ You don't have to use `generateWithGemini`: any provider works as long as you st
 `canUseAiFeature` first and `logAiUsage` after. But reusing it means model-tier upgrades,
 thinking-token fixes, and truncation handling only ever need fixing in one place.
 
+## Photos (optional image input)
+
+`generateWithGemini` takes an optional `images` array for features like the Lifts food scanner.
+Each item is `{ mimeType, base64 }`: plain base64 with no `data:` prefix. Limits: at most 2
+images, 4 MB each (decoded size), `image/jpeg`, `image/png` or `image/webp` only, and the bytes
+must really be that format. Anything else is refused before any network call and comes back as
+`{ content: null, succeeded: false, error: "..." }`. Photos are sent to Gemini as inline data and
+are never stored or logged by this package.
+
+Photo calls use the same `reflection` usage bucket as text calls, so the route is the same:
+`canUseAiFeature(supabase, userId, "reflection", timeZone)` first, `logAiUsage(...)` after.
+For a Premium-only feature, call `requirePremium(supabase, userId)` before that. It returns
+`{ ok: true, tier }` or `{ ok: false, reason: "premium_required", tier: "free" }`, and fails closed.
+`getSubscriptionTier` is also exported if you just need the tier.
+
+```ts
+const gate = await requirePremium(supabase, userId);
+if (!gate.ok) return NextResponse.json({ error: gate.reason }, { status: 402 });
+const check = await canUseAiFeature(supabase, userId, "reflection", timeZone);
+if (!check.allowed) return NextResponse.json({ error: check.reason }, { status: 402 });
+const result = await generateWithGemini({
+  apiKey: process.env.GEMINI_API_KEY!,
+  tier: check.tier,
+  systemPrompt: "...",
+  userContent: "Estimate the food in this photo.",
+  images: [{ mimeType: "image/jpeg", base64 }],
+});
+logAiUsage(supabase, userId, "reflection", "lifts", result.succeeded);
+```
+
+`validateImages(images)` and `buildGeminiRequest(options)` are exported too, for checking input
+early and for tests that must not use the network.
+
 ## Monthly window and time zones
 
 Limits count calls since the start of the current calendar month. Pass the user's IANA time

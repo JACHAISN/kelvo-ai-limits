@@ -86,6 +86,31 @@ export function currentCalendarMonthStart(timeZone?: string | null, now: Date = 
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
 }
 
+/**
+ * Looks up whether the user is on the free or premium tier. Exported so an app route can decide
+ * things like "this feature is Premium only" before it spends any AI budget. A missing row,
+ * a non-premium status, an expired period or a query error all count as "free".
+ */
+export async function getSubscriptionTier(supabase: SupabaseClient, userId: string): Promise<SubscriptionTier> {
+  return getTier(supabase, userId);
+}
+
+/** The reason string a Premium-only route sends back to a free user. Show a calm upgrade message. */
+export const PREMIUM_REQUIRED_REASON = "premium_required";
+
+/**
+ * Helper for Premium-only features (the Lifts food-photo scanner uses it). Call it first in the
+ * route, before canUseAiFeature. Fails closed: if premium cannot be confirmed, the answer is no.
+ */
+export async function requirePremium(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<{ ok: true; tier: "premium" } | { ok: false; reason: typeof PREMIUM_REQUIRED_REASON; tier: "free" }> {
+  const tier = await getTier(supabase, userId);
+  if (tier === "premium") return { ok: true, tier: "premium" };
+  return { ok: false, reason: PREMIUM_REQUIRED_REASON, tier: "free" };
+}
+
 async function getTier(supabase: SupabaseClient, userId: string): Promise<SubscriptionTier> {
   const { data } = await supabase
     .from("kelvo_subscriptions")
@@ -224,20 +249,91 @@ export async function checkGlobalDailySafetyNet(
 const FREE_TIER_MODEL = "gemini-3-flash-preview";
 const PREMIUM_TIER_MODEL = "gemini-3.1-pro-preview";
 
+// --- Optional image input ---
+// How this works: a caller (for example the Lifts food scanner) can pass up to 2 photos next to
+// the text. Each photo is { mimeType, base64 } where base64 is the raw base64 text of the file
+// (no "data:image/jpeg;base64," prefix). Everything is checked locally first, so a bad image
+// never reaches the network. Gemini receives each photo as an "inlineData" part placed before
+// the text, the documented REST shape: parts: [{ inlineData: { mimeType, data } }, { text }].
+// Image calls count against the same usage bucket as text calls (call_type "reflection"): the
+// caller still runs canUseAiFeature(..., "reflection", timeZone) and logAiUsage(...) as usual.
+
+export const ALLOWED_IMAGE_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
+export const MAX_IMAGES_PER_CALL = 2;
+export const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4 MB of decoded image data, per image
+
+export interface GeminiImage {
+  mimeType: string;
+  base64: string;
+}
+
+// Size of the original file, worked out from the base64 text length without decoding it all.
+function decodedByteLength(base64: string): number {
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return Math.floor((base64.length * 3) / 4) - padding;
+}
+
+// The first bytes of a real jpeg, png or webp file. Stops data being labelled as the wrong type.
+function matchesImageSignature(mimeType: string, base64: string): boolean {
+  const head = Buffer.from(base64.slice(0, 24), "base64");
+  if (mimeType === "image/jpeg") return head.length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff;
+  if (mimeType === "image/png") {
+    return head.length >= 4 && head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47;
+  }
+  if (mimeType === "image/webp") {
+    return head.length >= 12 && head.toString("latin1", 0, 4) === "RIFF" && head.toString("latin1", 8, 12) === "WEBP";
+  }
+  return false;
+}
+
+/** Returns null when the images are fine, or a short message saying what is wrong. */
+export function validateImages(images: unknown): string | null {
+  if (images === undefined) return null;
+  if (!Array.isArray(images)) return "images must be an array";
+  if (images.length > MAX_IMAGES_PER_CALL) return `at most ${MAX_IMAGES_PER_CALL} images are allowed`;
+  for (const image of images) {
+    if (!image || typeof image !== "object") return "each image must be an object";
+    const { mimeType, base64 } = image as Partial<GeminiImage>;
+    if (typeof mimeType !== "string" || !(ALLOWED_IMAGE_MIME_TYPES as readonly string[]).includes(mimeType)) {
+      return "image type must be jpeg, png or webp";
+    }
+    if (typeof base64 !== "string" || base64.length === 0) return "image data is empty";
+    if (base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) {
+      return "image data must be plain base64 with no data: prefix";
+    }
+    if (decodedByteLength(base64) > MAX_IMAGE_BYTES) return "image is larger than 4 MB";
+    if (!matchesImageSignature(mimeType, base64)) return "image data does not match its type";
+  }
+  return null;
+}
+
 export interface GenerateOptions {
   apiKey: string;
   tier: SubscriptionTier;
   systemPrompt: string;
   userContent: string;
   maxOutputTokens?: number;
+  /** Optional photos, up to 2. Leave out for a normal text-only call. */
+  images?: GeminiImage[];
 }
 
 export interface GenerateResult {
   content: string | null;
   succeeded: boolean;
+  /** Only set when the call was refused before any network request (for example bad images). */
+  error?: string;
 }
 
-export async function generateWithGemini(options: GenerateOptions): Promise<GenerateResult> {
+/**
+ * Builds the model name and JSON body for a Gemini request without sending anything, so tests
+ * can check the exact request shape with no network. Throws if the images are invalid.
+ */
+export function buildGeminiRequest(options: Omit<GenerateOptions, "apiKey">): {
+  model: string;
+  body: Record<string, unknown>;
+} {
+  const imageError = validateImages(options.images);
+  if (imageError) throw new Error(imageError);
   const model = options.tier === "premium" ? PREMIUM_TIER_MODEL : FREE_TIER_MODEL;
   const requestedMaxOutputTokens = options.maxOutputTokens ?? 400;
   // Pro can't turn thinking off (see below), and even at the lowest level it spends real tokens
@@ -247,22 +343,43 @@ export async function generateWithGemini(options: GenerateOptions): Promise<Gene
   // negligible at Flash/Pro pricing.
   const maxOutputTokens = model === PREMIUM_TIER_MODEL ? requestedMaxOutputTokens + 700 : requestedMaxOutputTokens;
 
+  // Photos go first, then the text.
+  const parts: Record<string, unknown>[] = (options.images ?? []).map((image) => ({
+    inlineData: { mimeType: image.mimeType, data: image.base64 },
+  }));
+  parts.push({ text: options.userContent });
+
+  return {
+    model,
+    body: {
+      systemInstruction: { parts: [{ text: options.systemPrompt }] },
+      contents: [{ role: "user", parts }],
+      generationConfig: {
+        maxOutputTokens,
+        // Flash tolerates disabling thinking outright, which avoids it eating the output
+        // budget on a short direct task and risking a mid-sentence truncation. Pro rejects
+        // thinkingBudget: 0 with a 400 ("this model only works in thinking mode"), so it gets
+        // the lowest thinking level instead, the closest equivalent it actually supports.
+        thinkingConfig: model === PREMIUM_TIER_MODEL ? { thinkingLevel: "LOW" } : { thinkingBudget: 0 },
+      },
+    },
+  };
+}
+
+export async function generateWithGemini(options: GenerateOptions): Promise<GenerateResult> {
+  // Invalid images fail closed here, before any network request. Image data is never logged.
+  const imageError = validateImages(options.images);
+  if (imageError) {
+    console.error("kelvo-ai-limits: rejected images:", imageError);
+    return { content: null, succeeded: false, error: imageError };
+  }
+  const { model, body } = buildGeminiRequest(options);
+
   try {
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-goog-api-key": options.apiKey },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: options.systemPrompt }] },
-        contents: [{ role: "user", parts: [{ text: options.userContent }] }],
-        generationConfig: {
-          maxOutputTokens,
-          // Flash tolerates disabling thinking outright, which avoids it eating the output
-          // budget on a short direct task and risking a mid-sentence truncation. Pro rejects
-          // thinkingBudget: 0 with a 400 ("this model only works in thinking mode"), so it gets
-          // the lowest thinking level instead, the closest equivalent it actually supports.
-          thinkingConfig: model === PREMIUM_TIER_MODEL ? { thinkingLevel: "LOW" } : { thinkingBudget: 0 },
-        },
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!res.ok) {
