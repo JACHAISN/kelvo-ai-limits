@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-export type CallType = "reflection" | "recap" | "insight" | "chat";
+export type CallType = "reflection" | "recap" | "insight" | "chat" | "capture";
 export type AppName = "lifts" | "journal" | "habits" | "tasks" | "hub";
 export type SubscriptionTier = "free" | "premium";
 
@@ -21,6 +21,13 @@ export const PREMIUM_REFLECTION_LIMIT_PER_MONTH = 60;
 // tier has zero access to this bucket, full stop (see isMultiEntry() below).
 export const PREMIUM_MULTI_ENTRY_LIMIT_PER_MONTH = 4;
 const MULTI_ENTRY_CALL_TYPES: CallType[] = ["recap", "insight", "chat"];
+
+// "Tell Kelvo" capture turns one short sentence into tasks, habit checks, lifts and a journal
+// entry. Each call is a small prompt with a short JSON answer, cheaper than a reflection, and
+// people use it many times a week, so it gets its own bucket with much higher caps. It never
+// shares a count with reflection or the multi-entry bucket.
+export const FREE_CAPTURE_LIMIT_PER_MONTH = 60;
+export const PREMIUM_CAPTURE_LIMIT_PER_MONTH = 300;
 
 // Cross-user monitoring only (not enforced anywhere in code): start conservative, raise once
 // real usage data comes in. Set the actual hard spend cap in your AI provider's console itself
@@ -166,6 +173,27 @@ export async function canUseAiFeature(
       return { allowed: false, reason: "premium_recap_limit_reached", remaining_this_period: 0, tier };
     }
     return { allowed: true, reason: null, remaining_this_period: PREMIUM_MULTI_ENTRY_LIMIT_PER_MONTH - used, tier };
+  }
+
+  if (callType === "capture") {
+    const captureLimit = tier === "premium" ? PREMIUM_CAPTURE_LIMIT_PER_MONTH : FREE_CAPTURE_LIMIT_PER_MONTH;
+    const { count, error } = await supabase
+      .from("kelvo_ai_usage")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .eq("call_type", "capture")
+      .gte("created_at", monthStart);
+    if (error) return usageCheckFailed(tier, error);
+    const used = count ?? 0;
+    if (used >= captureLimit) {
+      return {
+        allowed: false,
+        reason: tier === "premium" ? "premium_capture_limit_reached" : "free_tier_capture_limit_reached",
+        remaining_this_period: 0,
+        tier,
+      };
+    }
+    return { allowed: true, reason: null, remaining_this_period: captureLimit - used, tier };
   }
 
   const limit = tier === "premium" ? PREMIUM_REFLECTION_LIMIT_PER_MONTH : FREE_REFLECTION_LIMIT_PER_MONTH;

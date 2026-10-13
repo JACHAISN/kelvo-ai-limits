@@ -136,6 +136,11 @@ directly, nothing to install).
 - `"recap"` / `"insight"` / `"chat"`: multi-entry, pulls more context, costs more per call.
   **Free tier has zero access to these**, full stop. Premium shares
   `PREMIUM_MULTI_ENTRY_LIMIT_PER_MONTH` (4/mo) across all three call types combined.
+- `"capture"`: Tell Kelvo (one sentence filed into tasks, habits, lifts and journal). Its own
+  bucket: free `FREE_CAPTURE_LIMIT_PER_MONTH` (60/mo), premium `PREMIUM_CAPTURE_LIMIT_PER_MONTH`
+  (300/mo). Limit reasons are `free_tier_capture_limit_reached` and `premium_capture_limit_reached`.
+  The `kelvo_ai_usage` check constraint must allow `'capture'` (migration in kelvo-hub,
+  `20261012100000_ai_usage_capture.sql`).
 
 If your app needs a genuinely new call type, add it to the `CallType` union in `src/index.ts`
 and decide whether it belongs in the cheap single-entry bucket or the multi-entry bucket. Don't
