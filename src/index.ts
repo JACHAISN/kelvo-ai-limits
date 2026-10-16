@@ -30,8 +30,8 @@ export const FREE_CAPTURE_LIMIT_PER_MONTH = 60;
 export const PREMIUM_CAPTURE_LIMIT_PER_MONTH = 300;
 
 // Cross-user monitoring only (not enforced anywhere in code): start conservative, raise once
-// real usage data comes in. Set the actual hard spend cap in your AI provider's console itself
-// (Anthropic/Gemini/OpenAI); this number is for noticing a problem, not preventing one.
+// real usage data comes in. Set the actual hard spend cap in the AI provider's own console;
+// this number is for noticing a problem, not preventing one.
 export const GLOBAL_DAILY_CALL_ALERT_THRESHOLD = 200;
 
 export interface UsageCheckResult {
@@ -335,6 +335,11 @@ export function validateImages(images: unknown): string | null {
   return null;
 }
 
+// How long one Gemini request may take before it is abandoned. Vercel kills a function at 60
+// seconds and then nothing is logged and the phone retries; 25 seconds leaves room to log the
+// failure and answer the caller. Tests pass a much shorter timeoutMs.
+export const GEMINI_TIMEOUT_MS = 25000;
+
 export interface GenerateOptions {
   apiKey: string;
   tier: SubscriptionTier;
@@ -343,6 +348,8 @@ export interface GenerateOptions {
   maxOutputTokens?: number;
   /** Optional photos, up to 2. Leave out for a normal text-only call. */
   images?: GeminiImage[];
+  /** Milliseconds before the request is abandoned. Defaults to GEMINI_TIMEOUT_MS. */
+  timeoutMs?: number;
 }
 
 export interface GenerateResult {
@@ -356,7 +363,7 @@ export interface GenerateResult {
  * Builds the model name and JSON body for a Gemini request without sending anything, so tests
  * can check the exact request shape with no network. Throws if the images are invalid.
  */
-export function buildGeminiRequest(options: Omit<GenerateOptions, "apiKey">): {
+export function buildGeminiRequest(options: Omit<GenerateOptions, "apiKey" | "timeoutMs">): {
   model: string;
   body: Record<string, unknown>;
 } {
@@ -403,16 +410,19 @@ export async function generateWithGemini(options: GenerateOptions): Promise<Gene
   }
   const { model, body } = buildGeminiRequest(options);
 
+  // Logging rule: never log what the user wrote or what Gemini wrote back. Only the status,
+  // the finish reason, text lengths and at most 200 characters of an error body.
   try {
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-goog-api-key": options.apiKey },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(options.timeoutMs ?? GEMINI_TIMEOUT_MS),
     });
 
     if (!res.ok) {
-      const errBody = await res.text();
-      console.error("kelvo-ai-limits: Gemini API error", res.status, errBody);
+      const errBody = await res.text().catch(() => "");
+      console.error("kelvo-ai-limits: Gemini API error", res.status, errBody.slice(0, 200));
       return { content: null, succeeded: false };
     }
 
@@ -424,13 +434,20 @@ export async function generateWithGemini(options: GenerateOptions): Promise<Gene
     if (finishReason && finishReason !== "STOP") {
       // MAX_TOKENS (truncated mid-response), SAFETY, etc.: never return a broken/partial
       // response as if it were a real one.
-      console.error("kelvo-ai-limits: Gemini response did not finish normally", finishReason, text);
+      console.error("kelvo-ai-limits: Gemini response did not finish normally", finishReason, "text length", text?.length ?? 0);
       return { content: null, succeeded: false };
     }
 
     return { content: text ?? null, succeeded: Boolean(text) };
   } catch (err) {
-    console.error("kelvo-ai-limits: Gemini call threw", err);
+    // A timeout arrives as TimeoutError (or AbortError on older runtimes). Either way the
+    // caller gets the same failed result and logs the usage as a failure.
+    const name = err instanceof Error ? err.name : "unknown";
+    if (name === "TimeoutError" || name === "AbortError") {
+      console.error("kelvo-ai-limits: Gemini call timed out after", options.timeoutMs ?? GEMINI_TIMEOUT_MS, "ms");
+    } else {
+      console.error("kelvo-ai-limits: Gemini call threw", name);
+    }
     return { content: null, succeeded: false };
   }
 }
