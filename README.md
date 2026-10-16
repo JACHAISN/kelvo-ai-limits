@@ -8,8 +8,14 @@ No secrets live in this package. Each app supplies its own authenticated Supabas
 
 ## Setup (once per Supabase project)
 
-Run `supabase/migrations/001_kelvo_subscriptions_and_ai_usage.sql` in the Supabase SQL Editor.
-This only needs to happen once for the whole shared project, not per app.
+Run the files in `supabase/migrations/` in the Supabase SQL Editor, in name order:
+
+1. `20260806100000_kelvo_subscriptions_and_ai_usage.sql`: the two tables and their policies.
+2. `20260806100100_stripe_customer_id.sql`: Stripe ids on `kelvo_subscriptions`.
+3. `20261015100000_ai_usage_capture_call_type.sql`: adds `'capture'` to the call type check.
+
+This only needs to happen once for the whole shared project, not per app. Each file is safe to
+run twice.
 
 ## Installing in an app
 
@@ -66,6 +72,12 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ content: result.content });
 }
 ```
+
+`generateWithGemini` gives up after 25 seconds (`GEMINI_TIMEOUT_MS`, or `timeoutMs` per call)
+and comes back as `{ content: null, succeeded: false }`, so the usage still gets logged and the
+caller can answer before the hosting platform kills the function. Its logs never carry the
+user's text or Gemini's text, only the status, the finish reason, text lengths and at most 200
+characters of an error body.
 
 You don't have to use `generateWithGemini`: any provider works as long as you still call
 `canUseAiFeature` first and `logAiUsage` after. But reusing it means model-tier upgrades,
@@ -125,8 +137,10 @@ upgrade prompt. An empty usage table is not an error and still allows the call.
 
 ## Tests
 
-`npm test` runs `test/limits.test.ts` with Node's built-in runner (Node 24 runs TypeScript
-directly, nothing to install).
+`npm test` runs every `test/*.test.ts` file with Node's built-in runner (Node 24 runs TypeScript
+directly, nothing to install): `limits.test.ts` (buckets and the month window),
+`images.test.ts` (photo input and the request shape) and `timeout.test.ts` (the 25 second
+abort and what the logs may contain). None of them touch the network.
 
 ## Call types
 
@@ -139,8 +153,9 @@ directly, nothing to install).
 - `"capture"`: Tell Kelvo (one sentence filed into tasks, habits, lifts and journal). Its own
   bucket: free `FREE_CAPTURE_LIMIT_PER_MONTH` (60/mo), premium `PREMIUM_CAPTURE_LIMIT_PER_MONTH`
   (300/mo). Limit reasons are `free_tier_capture_limit_reached` and `premium_capture_limit_reached`.
-  The `kelvo_ai_usage` check constraint must allow `'capture'` (migration in kelvo-hub,
-  `20261012100000_ai_usage_capture.sql`).
+  The `kelvo_ai_usage` check constraint must allow `'capture'`: run this package's
+  `20261015100000_ai_usage_capture_call_type.sql` (kelvo-hub carries the same statement as
+  `20261012100000_ai_usage_capture.sql`; running either once is enough).
 
 If your app needs a genuinely new call type, add it to the `CallType` union in `src/index.ts`
 and decide whether it belongs in the cheap single-entry bucket or the multi-entry bucket. Don't
